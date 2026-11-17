@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
 # AlphaExtractor: pull sound assets out of a launcher's asset folder.
-# Only needs bash + grep/sed/sort.
+# Only needs bash + grep/sed/sort. Works on Linux and on Windows via Git Bash.
 set -u
+
+# Windows (Git Bash / MSYS / Cygwin): %APPDATA% and C:\paths need translating
+if command -v cygpath >/dev/null 2>&1; then
+  ON_WINDOWS=1
+else
+  ON_WINDOWS=0
+fi
+
+# Turn a Windows path (C:\Users\me\x) into one bash understands (/c/Users/me/x)
+to_unix_path() {
+  if (( ON_WINDOWS )); then cygpath -u -- "$1"; else printf '%s\n' "$1"; fi
+}
 
 OUT_BASE="${OUT_BASE:-$PWD}"   # extracted folders land where you run the script
 
@@ -15,6 +27,13 @@ PRISM_DIRS=(
   "$HOME/.local/share/prismlauncher"
   "$HOME/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher"
 )
+
+if (( ON_WINDOWS )); then
+  APPDATA_U="$(to_unix_path "${APPDATA:-$USERPROFILE/AppData/Roaming}")"
+  LOCALAPPDATA_U="$(to_unix_path "${LOCALAPPDATA:-$USERPROFILE/AppData/Local}")"
+  OFFICIAL_DIRS+=("$APPDATA_U/.minecraft")
+  PRISM_DIRS+=("$APPDATA_U/PrismLauncher" "$LOCALAPPDATA_U/PrismLauncher")
+fi
 
 # Folders the Alpha ports use (everything else in the old index gets skipped)
 ALPHA_DIRS="music|newmusic|newsound|sound|sound3|streaming"
@@ -80,7 +99,9 @@ choose_source() {
   if (( choice == 1 )); then
     GAME_ROOT=""
     read -r -e -p "Asset folder path: " ASSETS
+    ASSETS="${ASSETS%\"}"; ASSETS="${ASSETS#\"}"   # drop quotes from drag&drop / copy as path
     ASSETS="${ASSETS/#\~/$HOME}"
+    ASSETS="$(to_unix_path "$ASSETS")"
   else
     GAME_ROOT="${roots[$((choice-1))]}"
     ASSETS="$GAME_ROOT/assets"
