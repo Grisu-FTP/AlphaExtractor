@@ -1,5 +1,8 @@
 Since Minecraft doesnt ship its sounds in the Resource Packs (Also known as Texture Packs) you have to manually "extract" them from a real install. Just point this towards your Assets folder and it will do the rest
 
+It will also try to search and detect the default location for a few Launchers (if found)
+Currently Limited to: Official launcher, Prismlauncher
+
 The Path you enter should Contain the "indexes" and "objects" folder.
 
 It will then neatly spit out a folder you can put into your "Alpha" folder
