@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # AlphaExtractor: pull sound assets out of a launcher's asset folder.
-# Only needs bash + grep/sed/sort. Works on Linux and on Windows via Git Bash.
+# Only needs bash + grep/sed/sort. Works on Linux, macOS (stock bash 3.2) and Windows via Git Bash.
 set -u
 
 # Windows (Git Bash / MSYS / Cygwin): %APPDATA% and C:\paths need translating
@@ -28,6 +28,10 @@ PRISM_DIRS=(
   "$HOME/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher"
 )
 
+# macOS
+OFFICIAL_DIRS+=("$HOME/Library/Application Support/minecraft")
+PRISM_DIRS+=("$HOME/Library/Application Support/PrismLauncher")
+
 if (( ON_WINDOWS )); then
   APPDATA_U="$(to_unix_path "${APPDATA:-$USERPROFILE/AppData/Roaming}")"
   LOCALAPPDATA_U="$(to_unix_path "${LOCALAPPDATA:-$USERPROFILE/AppData/Local}")"
@@ -42,6 +46,10 @@ die() { echo "$*" >&2; exit 1; }
 
 # blank line + heading so each step stands out
 step() { echo; echo "--- $* ---"; echo; }
+
+
+# natural version sort (older macOS sort may lack -V, fall back to plain sort)
+vsort() { sort -V 2>/dev/null || sort; }
 
 
 # ---------- json helpers ----------
@@ -100,13 +108,22 @@ choose_source() {
     GAME_ROOT=""
     read -r -e -p "Asset folder path: " ASSETS
     ASSETS="${ASSETS%\"}"; ASSETS="${ASSETS#\"}"   # drop quotes from drag&drop / copy as path
-    ASSETS="${ASSETS/#\~/$HOME}"
+    ASSETS="${ASSETS%\'}"; ASSETS="${ASSETS#\'}"
+    ASSETS="$(printf '%s' "$ASSETS" | sed -E 's/\\(.)/\1/g')"   # terminal drag&drop escapes spaces as "\ "
+    ASSETS="${ASSETS%/}"
+    case "$ASSETS" in "~"|"~/"*) ASSETS="$HOME${ASSETS#\~}" ;; esac
     ASSETS="$(to_unix_path "$ASSETS")"
+    # allow pointing at the launcher folder (the one containing assets/)
+    if [[ ! -d "$ASSETS/indexes" && -d "$ASSETS/assets/indexes" ]]; then
+      GAME_ROOT="$ASSETS"
+      ASSETS="$ASSETS/assets"
+    fi
   else
     GAME_ROOT="${roots[$((choice-1))]}"
     ASSETS="$GAME_ROOT/assets"
   fi
 
+  [[ -d "$ASSETS" ]] || die "'$ASSETS' doesn't exist."
   [[ -d "$ASSETS/indexes" && -d "$ASSETS/objects" ]] \
     || die "'$ASSETS' needs both an 'indexes' and an 'objects' folder."
 }
@@ -114,50 +131,53 @@ choose_source() {
 
 # ---------- step 2: what versions are in there? ----------
 
-# Fills in:
-#   NAMES          menu entries, in display order
-#   INDEX_OF[name] asset index behind each entry
-#   COUNT[index]   file count per index
+# Fills in parallel arrays (bash 3.2 has no associative arrays):
+#   IDS[i] / COUNTS[i] / VERS[i]   asset index id, file count, newest version using it
+#   NAMES[j] / NAME_IDS[j]         menu entries (display order) and the index each maps to
 find_versions() {
-  declare -gA INDEX_OF=() COUNT=()
-  declare -A newest_version=()
-  local f id
+  IDS=(); COUNTS=(); VERS=(); NAMES=(); NAME_IDS=()
+  local f id i row ver
 
   for f in "$ASSETS"/indexes/*.json; do
     [[ -f "$f" ]] || continue
-    id="$(basename "$f" .json)"
-    COUNT[$id]="$(list_objects "$f" | wc -l)"
+    IDS+=("$(basename "$f" .json)")
+    COUNTS+=("$(list_objects "$f" | wc -l | tr -d ' ')")
+    VERS+=("")
   done
+  (( ${#IDS[@]} )) || die "No asset indexes found."
 
   # Match versions to indexes. Going oldest -> newest means the newest
   # version ends up as the name for each index.
   if [[ -n "$GAME_ROOT" ]]; then
-    local row ver
     # Prism keeps them in meta/net.minecraft, the official launcher in versions/<ver>/
     while IFS=$'\t' read -r ver f; do
       id="$(version_asset_index "$f")"
-      [[ -n "$id" && -n "${COUNT[$id]:-}" ]] && newest_version[$id]="$ver"
+      [[ -n "$id" ]] || continue
+      for i in "${!IDS[@]}"; do
+        [[ "${IDS[$i]}" == "$id" ]] && VERS[$i]="$ver"
+      done
     done < <(
       for f in "$GAME_ROOT"/meta/net.minecraft/*.json "$GAME_ROOT"/versions/*/*.json; do
         [[ -f "$f" ]] && printf '%s\t%s\n' "$(basename "$f" .json)" "$f"
-      done | sort -V -k1,1
+      done | vsort -k1,1
     )
   fi
 
-  # All the a1.x / b1.x / 1.0-1.5 versions share one index, so show it once
-  local name modern=()
-  for id in "${!COUNT[@]}"; do
-    if [[ "$id" == "pre-1.6" ]]; then
-      name="Pre 1.6"
-    else
-      name="${newest_version[$id]:-$id}"   # no known version? show the index id
-      modern+=("$name")
-    fi
-    INDEX_OF[$name]="$id"
+  # All the a1.x / b1.x / 1.0-1.5 versions share one index, so show it once.
+  # Modern ones first (version sorted), "Pre 1.6" last.
+  local pre=-1
+  while IFS=$'\t' read -r row i; do
+    [[ -n "$row" ]] || continue
+    NAMES+=("$row"); NAME_IDS+=("$i")
+  done < <(
+    for i in "${!IDS[@]}"; do
+      [[ "${IDS[$i]}" == "pre-1.6" ]] && continue
+      printf '%s\t%s\n' "${VERS[$i]:-${IDS[$i]}}" "$i"   # no known version? show the index id
+    done | vsort -k1,1
+  )
+  for i in "${!IDS[@]}"; do
+    [[ "${IDS[$i]}" == "pre-1.6" ]] && { NAMES+=("Pre 1.6"); NAME_IDS+=("$i"); }
   done
-
-  mapfile -t NAMES < <(printf '%s\n' "${modern[@]}" | sort -V)
-  [[ -n "${INDEX_OF[Pre 1.6]:-}" ]] && NAMES+=("Pre 1.6")
   (( ${#NAMES[@]} )) || die "No asset indexes found."
 }
 
@@ -165,14 +185,14 @@ choose_version() {
   local i pick
   step "2/3  Version"
   for i in "${!NAMES[@]}"; do
-    printf "  %3d) %-16s (%s files)\n" $((i+1)) "${NAMES[$i]}" "${COUNT[${INDEX_OF[${NAMES[$i]}]}]}"
+    printf "  %3d) %-16s (%s files)\n" $((i+1)) "${NAMES[$i]}" "${COUNTS[${NAME_IDS[$i]}]}"
   done
 
   read -r -p "Extract which one? [1-${#NAMES[@]}]: " pick
   [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#NAMES[@]} )) || die "Invalid choice."
 
   VERSION="${NAMES[$((pick-1))]}"
-  INDEX_ID="${INDEX_OF[$VERSION]}"
+  INDEX_ID="${IDS[${NAME_IDS[$((pick-1))]}]}"
 }
 
 
@@ -192,6 +212,7 @@ extract() {
   fi
   mkdir -p "$OUT"
 
+  local alpha_re="^($ALPHA_DIRS)$"
   grep -qE '"map_to_resources"[[:space:]]*:[[:space:]]*true' "$index_file" && legacy=1
 
   while IFS=$'\t' read -r rel hash; do
@@ -200,7 +221,7 @@ extract() {
     # everything left lives in minecraft/, so move it up a level
     rel="${rel#minecraft/}"
     # old index also has junk, only keep the Alpha folders
-    (( legacy )) && [[ ! "${rel%%/*}" =~ ^($ALPHA_DIRS)$ ]] && continue
+    (( legacy )) && [[ ! "${rel%%/*}" =~ $alpha_re ]] && continue
     # don't let a weird path escape the output folder
     case "/$rel/" in */../*|//*) continue ;; esac
 
